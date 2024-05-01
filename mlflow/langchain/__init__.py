@@ -946,6 +946,8 @@ def _config_path_context(code_path: Optional[str] = None):
 # and a randomly generated UUID. This approach effectively bypasses the caching
 # mechanism, as each import is considered as a separate module by the Python interpreter.
 def _load_model_code_path(code_path: str, config_path: Optional[str] = None):
+    print("code_path", code_path)
+    print("config_path", config_path)
     with _config_path_context(config_path):
         try:
             new_module_name = f"code_model_{uuid.uuid4().hex}"
