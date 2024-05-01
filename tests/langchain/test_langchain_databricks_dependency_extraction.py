@@ -1,5 +1,6 @@
 import sys
 from collections import defaultdict
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import langchain
@@ -36,31 +37,60 @@ class MockDatabricksServingEndpointClient:
         self.task = task
 
 
+@contextmanager
+def remove_langchain_modules():
+    prefixes_to_remove = [
+        "langchain.",
+        "langchain_community.embeddings",
+        "langchain_community.vectorstores",
+        "langchain_community.llms.Databricks",
+        "langchain_community.chat_models",
+    ]
+    langchain_modules = {
+        k: v
+        for k, v in sys.modules.copy().items()
+        if any(k.startswith(prefix) for prefix in prefixes_to_remove)
+    }
+
+    for k in langchain_modules:
+        del sys.modules[k]
+
+    try:
+        yield
+    finally:
+        for k, v in langchain_modules.items():
+            if k not in sys.modules:
+                sys.modules[k] = v
+            else:
+                pass
+
+
 @pytest.mark.skipif(
     Version(langchain.__version__) < Version("0.0.311"), reason="feature not existing"
 )
 def test_parsing_dependency_from_databricks_llm(monkeypatch: pytest.MonkeyPatch):
-    from langchain.llms import Databricks
+    with remove_langchain_modules():
+        from langchain.llms import Databricks
 
-    monkeypatch.setattr(
-        "langchain_community.llms.databricks._DatabricksServingEndpointClient",
-        MockDatabricksServingEndpointClient,
-    )
-    monkeypatch.setenv("DATABRICKS_HOST", "my-default-host")
-    monkeypatch.setenv("DATABRICKS_TOKEN", "my-default-token")
+        monkeypatch.setattr(
+            "langchain_community.llms.databricks._DatabricksServingEndpointClient",
+            MockDatabricksServingEndpointClient,
+        )
+        monkeypatch.setenv("DATABRICKS_HOST", "my-default-host")
+        monkeypatch.setenv("DATABRICKS_TOKEN", "my-default-token")
 
-    llm_kwargs = {"endpoint_name": "databricks-mixtral-8x7b-instruct"}
-    if IS_PICKLE_SERIALIZATION_RESTRICTED:
-        llm_kwargs["allow_dangerous_deserialization"] = True
+        llm_kwargs = {"endpoint_name": "databricks-mixtral-8x7b-instruct"}
+        if IS_PICKLE_SERIALIZATION_RESTRICTED:
+            llm_kwargs["allow_dangerous_deserialization"] = True
 
-    llm = Databricks(**llm_kwargs)
-    d = defaultdict(list)
-    resources = []
-    _extract_databricks_dependencies_from_llm(llm, d, resources)
-    assert d.get(_DATABRICKS_LLM_ENDPOINT_NAME_KEY) == ["databricks-mixtral-8x7b-instruct"]
-    assert resources == [
-        DatabricksServingEndpoint(endpoint_name="databricks-mixtral-8x7b-instruct")
-    ]
+        llm = Databricks(**llm_kwargs)
+        d = defaultdict(list)
+        resources = []
+        _extract_databricks_dependencies_from_llm(llm, d, resources)
+        assert d.get(_DATABRICKS_LLM_ENDPOINT_NAME_KEY) == ["databricks-mixtral-8x7b-instruct"]
+        assert resources == [
+            DatabricksServingEndpoint(endpoint_name="databricks-mixtral-8x7b-instruct")
+        ]
 
 
 class MockVectorSearchIndex:
@@ -83,101 +113,113 @@ class MockVectorSearchClient:
     Version(langchain.__version__) < Version("0.0.311"), reason="feature not existing"
 )
 def test_parsing_dependency_from_databricks_retriever(monkeypatch: pytest.MonkeyPatch):
-    from langchain.embeddings import DatabricksEmbeddings
-    from langchain.vectorstores import DatabricksVectorSearch
+    with remove_langchain_modules():
+        from langchain.embeddings import DatabricksEmbeddings
+        from langchain.vectorstores import DatabricksVectorSearch
 
-    vsc = MockVectorSearchClient()
-    vs_index = vsc.get_index(endpoint_name="dbdemos_vs_endpoint", index_name="mlflow.rag.vs_index")
-    mock_get_deploy_client = MagicMock()
+        vsc = MockVectorSearchClient()
+        vs_index = vsc.get_index(
+            endpoint_name="dbdemos_vs_endpoint", index_name="mlflow.rag.vs_index"
+        )
+        mock_get_deploy_client = MagicMock()
 
-    monkeypatch.setattr("mlflow.deployments.get_deploy_client", mock_get_deploy_client)
-    embedding_model = DatabricksEmbeddings(endpoint="databricks-bge-large-en")
+        monkeypatch.setattr("mlflow.deployments.get_deploy_client", mock_get_deploy_client)
+        embedding_model = DatabricksEmbeddings(endpoint="databricks-bge-large-en")
 
-    mock_module = MagicMock()
-    mock_module.VectorSearchIndex = MockVectorSearchIndex
+        mock_module = MagicMock()
+        mock_module.VectorSearchIndex = MockVectorSearchIndex
 
-    monkeypatch.setitem(sys.modules, "databricks.vector_search.client", mock_module)
+        monkeypatch.setitem(sys.modules, "databricks.vector_search.client", mock_module)
 
-    vectorstore = DatabricksVectorSearch(vs_index, text_column="content", embedding=embedding_model)
-    retriever = vectorstore.as_retriever()
-    d = defaultdict(list)
-    resources = []
-    _extract_databricks_dependencies_from_retriever(retriever, d, resources)
-    assert d.get(_DATABRICKS_EMBEDDINGS_ENDPOINT_NAME_KEY) == ["databricks-bge-large-en"]
-    assert d.get(_DATABRICKS_VECTOR_SEARCH_INDEX_NAME_KEY) == ["mlflow.rag.vs_index"]
-    assert d.get(_DATABRICKS_VECTOR_SEARCH_ENDPOINT_NAME_KEY) == ["dbdemos_vs_endpoint"]
-    assert resources == [
-        DatabricksVectorSearchIndex(index_name="mlflow.rag.vs_index"),
-        DatabricksServingEndpoint(endpoint_name="dbdemos_vs_endpoint"),
-        DatabricksServingEndpoint(endpoint_name="databricks-bge-large-en"),
-    ]
+        vectorstore = DatabricksVectorSearch(
+            vs_index, text_column="content", embedding=embedding_model
+        )
+        retriever = vectorstore.as_retriever()
+        d = defaultdict(list)
+        resources = []
+        _extract_databricks_dependencies_from_retriever(retriever, d, resources)
+        assert d.get(_DATABRICKS_EMBEDDINGS_ENDPOINT_NAME_KEY) == ["databricks-bge-large-en"]
+        assert d.get(_DATABRICKS_VECTOR_SEARCH_INDEX_NAME_KEY) == ["mlflow.rag.vs_index"]
+        assert d.get(_DATABRICKS_VECTOR_SEARCH_ENDPOINT_NAME_KEY) == ["dbdemos_vs_endpoint"]
+        assert resources == [
+            DatabricksVectorSearchIndex(index_name="mlflow.rag.vs_index"),
+            DatabricksServingEndpoint(endpoint_name="dbdemos_vs_endpoint"),
+            DatabricksServingEndpoint(endpoint_name="databricks-bge-large-en"),
+        ]
 
 
 @pytest.mark.skipif(
     Version(langchain.__version__) < Version("0.0.311"), reason="feature not existing"
 )
 def test_parsing_dependency_from_databricks_retriever(monkeypatch: pytest.MonkeyPatch):
-    from langchain_community.embeddings import DatabricksEmbeddings
-    from langchain_community.vectorstores import DatabricksVectorSearch
+    with remove_langchain_modules():
+        from langchain_community.embeddings import DatabricksEmbeddings
+        from langchain_community.vectorstores import DatabricksVectorSearch
 
-    vsc = MockVectorSearchClient()
-    vs_index = vsc.get_index(endpoint_name="dbdemos_vs_endpoint", index_name="mlflow.rag.vs_index")
-    mock_get_deploy_client = MagicMock()
+        vsc = MockVectorSearchClient()
+        vs_index = vsc.get_index(
+            endpoint_name="dbdemos_vs_endpoint", index_name="mlflow.rag.vs_index"
+        )
+        mock_get_deploy_client = MagicMock()
 
-    monkeypatch.setattr("mlflow.deployments.get_deploy_client", mock_get_deploy_client)
-    embedding_model = DatabricksEmbeddings(endpoint="databricks-bge-large-en")
+        monkeypatch.setattr("mlflow.deployments.get_deploy_client", mock_get_deploy_client)
+        embedding_model = DatabricksEmbeddings(endpoint="databricks-bge-large-en")
 
-    mock_module = MagicMock()
-    mock_module.VectorSearchIndex = MockVectorSearchIndex
+        mock_module = MagicMock()
+        mock_module.VectorSearchIndex = MockVectorSearchIndex
 
-    monkeypatch.setitem(sys.modules, "databricks.vector_search.client", mock_module)
+        monkeypatch.setitem(sys.modules, "databricks.vector_search.client", mock_module)
 
-    vectorstore = DatabricksVectorSearch(vs_index, text_column="content", embedding=embedding_model)
-    retriever = vectorstore.as_retriever()
-    d = defaultdict(list)
-    resources = []
-    _extract_databricks_dependencies_from_retriever(retriever, d, resources)
-    assert d.get(_DATABRICKS_EMBEDDINGS_ENDPOINT_NAME_KEY) == ["databricks-bge-large-en"]
-    assert d.get(_DATABRICKS_VECTOR_SEARCH_INDEX_NAME_KEY) == ["mlflow.rag.vs_index"]
-    assert d.get(_DATABRICKS_VECTOR_SEARCH_ENDPOINT_NAME_KEY) == ["dbdemos_vs_endpoint"]
-    assert resources == [
-        DatabricksVectorSearchIndex(index_name="mlflow.rag.vs_index"),
-        DatabricksServingEndpoint(endpoint_name="dbdemos_vs_endpoint"),
-        DatabricksServingEndpoint(endpoint_name="databricks-bge-large-en"),
-    ]
-
-
-@pytest.mark.skipif(
-    Version(langchain.__version__) < Version("0.0.311"), reason="feature not existing"
-)
-def test_parsing_dependency_from_databricks_chat(monkeypatch: pytest.MonkeyPatch):
-    from langchain.chat_models import ChatDatabricks
-
-    mock_get_deploy_client = MagicMock()
-
-    monkeypatch.setattr("mlflow.deployments.get_deploy_client", mock_get_deploy_client)
-
-    chat_model = ChatDatabricks(endpoint="databricks-llama-2-70b-chat", max_tokens=500)
-    d = defaultdict(list)
-    resources = []
-    _extract_databricks_dependencies_from_chat_model(chat_model, d, resources)
-    assert d.get(_DATABRICKS_CHAT_ENDPOINT_NAME_KEY) == ["databricks-llama-2-70b-chat"]
-    assert resources == [DatabricksServingEndpoint(endpoint_name="databricks-llama-2-70b-chat")]
+        vectorstore = DatabricksVectorSearch(
+            vs_index, text_column="content", embedding=embedding_model
+        )
+        retriever = vectorstore.as_retriever()
+        d = defaultdict(list)
+        resources = []
+        _extract_databricks_dependencies_from_retriever(retriever, d, resources)
+        assert d.get(_DATABRICKS_EMBEDDINGS_ENDPOINT_NAME_KEY) == ["databricks-bge-large-en"]
+        assert d.get(_DATABRICKS_VECTOR_SEARCH_INDEX_NAME_KEY) == ["mlflow.rag.vs_index"]
+        assert d.get(_DATABRICKS_VECTOR_SEARCH_ENDPOINT_NAME_KEY) == ["dbdemos_vs_endpoint"]
+        assert resources == [
+            DatabricksVectorSearchIndex(index_name="mlflow.rag.vs_index"),
+            DatabricksServingEndpoint(endpoint_name="dbdemos_vs_endpoint"),
+            DatabricksServingEndpoint(endpoint_name="databricks-bge-large-en"),
+        ]
 
 
 @pytest.mark.skipif(
     Version(langchain.__version__) < Version("0.0.311"), reason="feature not existing"
 )
 def test_parsing_dependency_from_databricks_chat(monkeypatch: pytest.MonkeyPatch):
-    from langchain_community.chat_models import ChatDatabricks
+    with remove_langchain_modules():
+        from langchain.chat_models import ChatDatabricks
 
-    mock_get_deploy_client = MagicMock()
+        mock_get_deploy_client = MagicMock()
 
-    monkeypatch.setattr("mlflow.deployments.get_deploy_client", mock_get_deploy_client)
+        monkeypatch.setattr("mlflow.deployments.get_deploy_client", mock_get_deploy_client)
 
-    chat_model = ChatDatabricks(endpoint="databricks-llama-2-70b-chat", max_tokens=500)
-    d = defaultdict(list)
-    resources = []
-    _extract_databricks_dependencies_from_chat_model(chat_model, d, resources)
-    assert d.get(_DATABRICKS_CHAT_ENDPOINT_NAME_KEY) == ["databricks-llama-2-70b-chat"]
-    assert resources == [DatabricksServingEndpoint(endpoint_name="databricks-llama-2-70b-chat")]
+        chat_model = ChatDatabricks(endpoint="databricks-llama-2-70b-chat", max_tokens=500)
+        d = defaultdict(list)
+        resources = []
+        _extract_databricks_dependencies_from_chat_model(chat_model, d, resources)
+        assert d.get(_DATABRICKS_CHAT_ENDPOINT_NAME_KEY) == ["databricks-llama-2-70b-chat"]
+        assert resources == [DatabricksServingEndpoint(endpoint_name="databricks-llama-2-70b-chat")]
+
+
+@pytest.mark.skipif(
+    Version(langchain.__version__) < Version("0.0.311"), reason="feature not existing"
+)
+def test_parsing_dependency_from_databricks_chat(monkeypatch: pytest.MonkeyPatch):
+    with remove_langchain_modules():
+        from langchain_community.chat_models import ChatDatabricks
+
+        mock_get_deploy_client = MagicMock()
+
+        monkeypatch.setattr("mlflow.deployments.get_deploy_client", mock_get_deploy_client)
+
+        chat_model = ChatDatabricks(endpoint="databricks-llama-2-70b-chat", max_tokens=500)
+        d = defaultdict(list)
+        resources = []
+        _extract_databricks_dependencies_from_chat_model(chat_model, d, resources)
+        assert d.get(_DATABRICKS_CHAT_ENDPOINT_NAME_KEY) == ["databricks-llama-2-70b-chat"]
+        assert resources == [DatabricksServingEndpoint(endpoint_name="databricks-llama-2-70b-chat")]
